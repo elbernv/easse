@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Easse Real World Demo</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        max-width: 800px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+        background: #f4f4f5;
+        color: #18181b;
+      }
+      h1 {
+        border-bottom: 2px solid #e4e4e7;
+        padding-bottom: 0.5rem;
+      }
+      .controls {
+        background: white;
+        padding: 1rem;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        margin-bottom: 2rem;
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+      }
+      #status {
+        font-weight: bold;
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #d4d4d8;
+      }
+      .dot.connected {
+        background: #22c55e;
+        box-shadow: 0 0 8px #22c55e;
+      }
+      .dot.disconnected {
+        background: #ef4444;
+      }
+      .dot.recovering {
+        background: #eab308;
+        animation: pulse 1s infinite;
+      }
+
+      #log {
+        list-style: none;
+        padding: 0;
+        display: flex;
+        flex-direction: column-reverse;
+        gap: 0.5rem;
+        max-height: 60vh;
+        overflow-y: auto;
+      }
+      .event {
+        background: white;
+        padding: 0.75rem;
+        border-radius: 6px;
+        border-left: 4px solid #3b82f6;
+        display: flex;
+        justify-content: space-between;
+        animation: slideIn 0.2s ease-out;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+      }
+      .event.recovered {
+        border-left-color: #f59e0b;
+        background: #fffbeb;
+      }
+      .meta {
+        color: #71717a;
+        font-size: 0.85rem;
+      }
+
+      @keyframes pulse {
+        50% {
+          opacity: 0.5;
+        }
+      }
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateY(-5px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>📡 Easse Real World Test</h1>
+
+    <div class="controls">
+      <div>Prueba de desconexión real (WiFi)</div>
+      <div id="status">
+        <span id="statusText">Iniciando...</span>
+        <div id="statusDot" class="dot"></div>
+      </div>
+    </div>
+
+    <ul id="log"></ul>
+
+    <script>
+      const log = document.getElementById('log');
+      const statusText = document.getElementById('statusText');
+      const statusDot = document.getElementById('statusDot');
+
+      // ID aleatorio para identificar sesiones en el server log
+      const clientId = Math.floor(Math.random() * 10000);
+
+      function connect() {
+        updateStatus('connecting');
+        console.log('Iniciando conexión SSE...');
+
+        const eventSource = new EventSource(
+          `http://192.168.0.102:3000/events?clientId=${clientId}`, // your ip
+        );
+
+        eventSource.onopen = () => {
+          updateStatus('connected');
+          console.log('Conexión abierta (onopen)');
+        };
+
+        eventSource.onerror = (err) => {
+          console.log('Error de conexión (onerror)', err);
+          if (eventSource.readyState === EventSource.CLOSED) {
+            updateStatus('disconnected');
+          } else {
+            updateStatus('reconnecting');
+          }
+        };
+
+        eventSource.addEventListener('ping', (e) => {
+          const data = JSON.parse(e.data);
+          // Detectar si es recuperado (si el lastEventId salta o si llega muy rápido tras reconexión)
+          // En esta demo simple, lo marcamos si estamos en estado "reconnecting" visualmente
+          // O mejor: comparamos timestamps o IDs?
+          // La forma más visual es verlos llegar en ráfaga.
+
+          addLog(`[${data.time}] ${data.message}`, e.lastEventId);
+        });
+      }
+
+      function updateStatus(state) {
+        statusDot.className = 'dot';
+        switch (state) {
+          case 'connected':
+            statusText.innerText = 'Conectado';
+            statusDot.classList.add('connected');
+            break;
+          case 'disconnected':
+            statusText.innerText = 'Desconectado';
+            statusDot.classList.add('disconnected');
+            break;
+          case 'reconnecting':
+          case 'connecting':
+            statusText.innerText = 'Reconectando...';
+            statusDot.classList.add('recovering');
+            break;
+        }
+      }
+
+      function addLog(msg, id) {
+        const li = document.createElement('li');
+        li.className = 'event';
+        li.innerHTML = `
+                <span class="content">${msg}</span>
+                <span class="meta">ID: ${id}</span>
+            `;
+        log.prepend(li);
+      }
+
+      // Iniciar
+      connect();
+    </script>
+  </body>
+</html>
