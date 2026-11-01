@@ -1,35 +1,53 @@
-import { Request, Response, NextFunction, RequestHandler } from 'express';
+import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { Easse, type EasseOptions } from '../core/hub.js';
+import type { SSEStream } from '../core/stream.js';
 
 export type { EasseOptions };
 
+declare global {
+  namespace Express {
+    interface Response {
+      /** The SSE connection, available on routes using the `easse()` middleware. */
+      sse: SSEStream;
+    }
+  }
+}
+
 export interface EasseMiddleware extends RequestHandler {
+  /** Sends an event to every client connected through this middleware. */
   broadcast(data: unknown, event?: string): void;
 }
 
 /**
- * Middleware Factory.
- * Creates an internal Easse instance and attaches it to every request.
- * Returns a RequestHandler that also has the .broadcast() method.
+ * Creates a route middleware that turns the request into an SSE connection.
+ * Each call creates an independent channel with its own clients and buffer.
+ *
+ * @example
+ * const sse = easse();
+ * app.get('/events', sse);
+ * sse.broadcast({ price: 123.5 }, 'price-update');
  */
 export function easse(options: EasseOptions = {}): EasseMiddleware {
-  // One Easse instance (Buffer) per middleware usage
   const hub = new Easse(options);
 
-  const middleware: RequestHandler = (req: Request, res: Response, next: NextFunction) => {
-    // Delegate creation and management to the Hub
-    const stream = hub.handle(req, res);
+  const middleware = (req: Request, res: Response, next: NextFunction): void => {
+    // `app.use` would turn every request under its path into a stream.
+    if (!req.route) {
+      next(new Error("easse: mount the middleware on a route, e.g. app.get('/events', sse)"));
+      return;
+    }
 
-    // Inject into response
-    res.sse = stream;
+    // `app.get` also matches HEAD, which has no body to stream.
+    if (req.method === 'HEAD') {
+      res.status(200).type('text/event-stream').end();
+      return;
+    }
 
+    res.sse = hub.handle(req, res);
     next();
   };
 
-  // Attach the broadcast method to the middleware (Pattern: Function Object)
-  (middleware as EasseMiddleware).broadcast = (data: unknown, event?: string) => {
-    hub.broadcast(data, event);
-  };
-
-  return middleware as EasseMiddleware;
+  return Object.assign(middleware, {
+    broadcast: (data: unknown, event?: string) => hub.broadcast(data, event),
+  });
 }
