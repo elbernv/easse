@@ -374,9 +374,12 @@ describe.each([
     it('disconnects a client that stopped reading, sparing the others', async () => {
       const app = express();
       const sse = easse({ maxBufferedBytes: 1024, maxEvents: 1, heartbeatMs: 0 });
+      const responses = new Map<string, Response>();
       const closes: string[] = [];
       app.get('/events', sse, (req, res) => {
-        res.on('close', () => closes.push(String(req.query.name)));
+        const name = String(req.query.name);
+        responses.set(name, res);
+        res.on('close', () => closes.push(name));
       });
       const port = await listen(app);
 
@@ -385,12 +388,16 @@ describe.each([
       stalled.write('GET /events?name=stalled HTTP/1.1\r\nHost: test\r\n\r\n');
       stalled.pause();
       const healthy = await connect(port, '/events?name=healthy');
-      await sleep(30);
+      await vi.waitFor(() => expect(responses.size).toBe(2));
 
       const chunk = 'x'.repeat(1024 * 1024);
       for (let i = 0; i < 64 && closes.length === 0; i++) {
         sse.broadcast(chunk);
-        await sleep(5);
+        // A client still reading is over the limit too, so let this one catch up each time.
+        await vi.waitFor(() => expect(responses.get('healthy')?.writableLength).toBe(0), {
+          interval: 1,
+          timeout: 4000,
+        });
       }
 
       expect(closes).toEqual(['stalled']);
