@@ -1,96 +1,38 @@
-# easse (Easy Server-Sent Events)
+# easse
 
-**Professional, Resilient, and Type-Safe Server-Sent Events (SSE) library for Express.js.**
+**Server-Sent Events for Express, with recovery of missed events after a reconnection.**
 
-`easse` is a lightweight implementation of the SSE protocol focused on **connection resilience**. It implements a server-side "Sliding Window Buffer" that caches recent events, allowing clients to automatically recover missed messages after temporary network partitions (WiFi drops, switching networks, etc.) without losing data.
+`easse` keeps a window of recent broadcast events in memory. When a client's connection drops, the browser's `EventSource` reconnects by itself and `easse` replays what it missed. If the gap is too old to recover, the client is told so it can reload its state, instead of silently ending up out of date.
 
----
+- **Recovery:** handles `Last-Event-ID` for you, with a configurable window.
+- **Broadcast:** serializes each event once and writes it to every client.
+- **Connection care:** heartbeats, and disconnection of clients that stop reading.
+- **TypeScript:** `res.sse` is typed out of the box.
+- **Small:** no runtime dependencies. Works with Express 4 and 5.
 
-## ⚡ Key Features
-
-- **🛡️ Resilience by Design:** Built-in `ResilienceBuffer` handles `Last-Event-ID` negotiation automatically.
-- **📢 Native Broadcast:** Efficiently multicast events to thousands of connected clients with a single call.
-- **📦 TypeScript & ESM:** Built for modern Node.js (20+) using native ESM and strictly typed interfaces.
-- **🚀 Performance:** Zero-copy broadcasting (events are serialized once and piped to all active streams).
-- **🔌 Express Integration:** Drop-in middleware that injects `res.sse` context.
-
----
-
-## 📥 Installation
+## Installation
 
 ```bash
 npm install easse
 ```
 
-_Requirements: Node.js 20+ (ESM support required)_
+Requires Node.js 20+ and an ESM project, since the package is ESM only. For TypeScript, also install `@types/express`.
 
----
+## Quick start
 
-## 🚀 Quick Start
+### Broadcast to everyone
 
-### 1. Simple Stream (Unicast)
-
-Use this pattern for user-specific streams (e.g., notifications, user data updates).
+Use `broadcast` for events that everyone should get. These are the events that can be recovered.
 
 ```typescript
 import express from 'express';
 import { easse } from 'easse';
 
 const app = express();
+const sse = easse({ retentionMs: 60_000 });
 
-// Middleware injection
-app.use(easse({ retentionMs: 10000 }));
+app.get('/events', sse);
 
-app.get('/my-stream', (req, res) => {
-  // Send an immediate event to THIS specific connection
-  res.sse.send({ status: 'connected' }, 'welcome');
-
-  // Simulate async events
-  const interval = setInterval(() => {
-    res.sse.send({ time: Date.now() }, 'ping');
-  }, 1000);
-
-  // Clean up on disconnect to prevent leaks
-  req.on('close', () => clearInterval(interval));
-});
-
-app.listen(3000);
-```
-
-### 2. Broadcast (Multicast)
-
-Use this pattern for global events (e.g., stock prices, chat rooms, system alerts). The middleware instance exposes the broadcast method.
-
-```typescript
-import express from 'express';
-import { easse } from 'easse';
-
-const app = express();
-
-// 1. Create the middleware instance
-const sse = easse({ retentionMs: 30000 });
-
-// 2. Mount it
-app.use('/events', sse);
-
-// 3. Handle connection (Optional but Recommended)
-// The middleware has already established the connection.
-// Use this handler to send the "Initial State" or "Welcome Message".
-app.get('/events', (req, res) => {
-  // Example: Send the current data immediately so the UI isn't empty
-  res.sse.send(
-    {
-      msg: 'Welcome! Connection established.',
-      currentPrice: 123.45, // Send current state instantly
-    },
-    'init',
-  );
-
-  console.log(`Client ${req.ip} connected and received initial state.`);
-});
-
-// 4. Global Broadcast
-// Later, updates are sent to everyone...
 setInterval(() => {
   sse.broadcast({ price: 123.5 }, 'price-update');
 }, 2000);
@@ -98,146 +40,190 @@ setInterval(() => {
 app.listen(3000);
 ```
 
----
+### Send to one client
 
-## 📢 Understanding Broadcast vs Unicast
-
-### When to use which?
-
-| Feature       | Unicast (One-to-One)                               | Broadcast (One-to-Many)                                |
-| :------------ | :------------------------------------------------- | :----------------------------------------------------- |
-| **Target**    | Specific User                                      | All Connected Users                                    |
-| **Data**      | Private / Personalized                             | Public / Global                                        |
-| **Method**    | `res.sse.send()`                                   | `sse.broadcast()`                                      |
-| **Use Cases** | User Notifications, Task Progress, Direct Messages | Stock Prices, Sports Scores, System Alerts, Chat Rooms |
-
-### The Middleware Logic
-
-When you mount `app.use(easse())`, the library intercepts the request before it even reaches your route handler. It:
-
-1.  **Handshakes:** Sets `Content-Type: text/event-stream` and other essential headers.
-2.  **Registers:** Adds the connection to an internal `Set` of active clients.
-3.  **Recovers:** Checks for `Last-Event-ID` and replays missed messages from the buffer.
-4.  **Injects:** Attaches the `res.sse` object so you can send private messages if needed.
-
-### Decoupled Broadcasting
-
-The `sse.broadcast()` method is attached to the middleware function itself. This allows you to trigger events **outside the request-response cycle**.
-
-If you have 5,000 clients connected, calling `broadcast()`:
-
-- **CPU Efficient:** Serializes your JSON object once.
-- **Memory Efficient:** Stores a single reference in the `ResilienceBuffer`.
-- **Atomic:** Every client receives the exact same `id` for that event, ensuring consistent state across your entire user base.
-
----
-
-## 🧠 Technical Architecture
-
-### Resilience & Recovery Mechanism
-
-The core differentiator of `easse` is its handling of connection drops. The SSE spec defines a `Last-Event-ID` header.
-
-1.  **Server Buffer:** Each `easse` instance maintains a circular buffer of recent events.
-2.  **Disconnection:** If a client drops (e.g., user enters an elevator), the TCP connection closes.
-3.  **Reconnection:** The browser's `EventSource` automatically reconnects, sending the `Last-Event-ID` of the last successful message it received.
-4.  **Recovery:** `easse` intercepts this header, looks up the ID in its buffer, and immediately "replays" all subsequent missed messages before sending new ones.
-
-### Configuration (`EasseOptions`)
+Use `res.sse.send` for data meant for a single connection. It is never stored, so it cannot reach anyone else, and it is **not** recovered after a reconnection.
 
 ```typescript
-interface EasseOptions {
-  /**
-   * Time in milliseconds to keep events in memory for recovery.
-   * Events older than this are evicted.
-   * @default 5000 (5 seconds)
-   * @max 10000 (10 seconds - hard limit for safety)
-   */
-  retentionMs?: number;
-}
+import express from 'express';
+import { easse } from 'easse';
+
+const app = express();
+
+app.get('/my-stream', easse(), (req, res) => {
+  res.sse.send({ status: 'connected' }, 'welcome');
+
+  const interval = setInterval(() => {
+    res.sse.send({ time: Date.now() }, 'ping');
+  }, 1000);
+
+  // Stop your own timers when the client disconnects.
+  res.on('close', () => clearInterval(interval));
+});
+
+app.listen(3000);
 ```
 
----
+### Combine both
 
-## ⚠️ Production Considerations
+Replayed events are written before your handler runs, so you can send the initial state only to clients that need it.
 
-### 1. HTTP/1.1 vs HTTP/2
+```typescript
+import express from 'express';
+import { easse } from 'easse';
 
-Server-Sent Events (SSE) keep a persistent connection open.
+const app = express();
+const sse = easse();
+let currentPrice = 123.45;
 
-- **HTTP/1.1:** Browsers have a limit of **6 concurrent connections** per domain. If you open more than 6 tabs listening to SSE on `http://localhost`, the 7th tab will hang forever waiting for a socket.
-- **HTTP/2:** Multiplexes multiple streams over a single TCP connection, effectively removing this limit.
+app.get('/events', sse, (req, res) => {
+  if (!res.sse.recovered) {
+    res.sse.send({ price: currentPrice }, 'init');
+  }
+});
 
-**Recommendation:** For production deployment, ensure your application is served behind an **HTTP/2 compliant reverse proxy** (Nginx, Cloudflare, AWS ALB, etc.).
+setInterval(() => {
+  currentPrice += 0.01;
+  sse.broadcast({ price: currentPrice }, 'price-update');
+}, 2000);
 
-### 2. Proxy Buffering (Nginx/Apache)
-
-Many proxies default to buffering responses to optimize throughput, which breaks real-time streaming (clients receive events in chunks or only when the buffer is full).
-
-`easse` automatically sets the following header to prevent this:
-
-```http
-X-Accel-Buffering: no
+app.listen(3000);
 ```
 
-This ensures Nginx (and compatible proxies) flushes events immediately to the client.
-
----
-
-## 📚 API Reference
-
-### `res.sse` (Context)
-
-Injected into the Express Response object. Represents the **current individual connection**.
-
-#### `res.sse.send(data: unknown, event?: string, id?: string)`
-
-Sends a single event frame to the client.
-
-- **data**: Automatically serialized. Objects are `JSON.stringify`'d. Strings are sent as-is.
-- **event**: (Optional) The event name (e.g., `addEventListener('price', ...)`).
-- **id**: (Optional) Unique ID. If omitted, a UUID v4 is generated automatically.
-
----
-
-### `middleware` (Broadcast Controller)
-
-The function returned by `easse()` acts as both an Express RequestHandler and a Broadcast Controller.
-
-#### `sse.broadcast(data: unknown, event?: string)`
-
-Sends an event to **all** currently connected clients served by this middleware instance.
-
-- **Optimization:** The event is formatted and stored in the resilience buffer **once**, then written to all open writable streams.
-
----
-
-## 💻 Client-Side Implementation
-
-`easse` is fully compatible with the native browser `EventSource` API.
+### In the browser
 
 ```javascript
 const source = new EventSource('/events');
 
-// Handle named events
 source.addEventListener('price-update', (e) => {
-  const data = JSON.parse(e.data);
-  console.log('New Price:', data.price);
+  console.log('New price:', JSON.parse(e.data).price);
 });
 
-// Handle connection status
-source.onopen = () => console.log('Connected');
-source.onerror = (err) => console.error('Disconnected, attempting reconnect...');
+// The events this client missed are gone: reload the state from your API.
+source.addEventListener('easse:reset', () => {
+  reloadState();
+});
 ```
 
----
+## How recovery works
 
-## 🤝 Contributing
+1. Every `broadcast` gets an ID and is stored in the channel's buffer.
+2. When the connection drops, `EventSource` reconnects by itself and sends the ID of the last event it received in the `Last-Event-ID` header.
+3. `easse` looks that ID up before calling your handler:
 
-This project is Native ESM.
+| Situation                      | What the client gets        | `res.sse.recovered` |
+| :----------------------------- | :-------------------------- | :------------------ |
+| First connection               | Nothing extra               | `false`             |
+| ID found in the buffer         | The missed events, in order | `true`              |
+| Client is already up to date   | Nothing extra               | `true`              |
+| ID unknown or no longer stored | An `easse:reset` event      | `false`             |
 
-- **Build:** `npm run build`
-- **Test:** `npm test` (Vitest)
-- **Dev:** `npm run dev`
+### What can be recovered
 
-License: MIT
+A client can recover a gap only if it is within **both** limits:
+
+- **`retentionMs`:** how long ago the events were sent.
+- **`maxEvents`:** the buffer must still hold the client's last event, so up to `maxEvents - 1` events can be recovered.
+
+Recovery is all or nothing: past these limits the client gets `easse:reset` rather than part of the gap.
+
+The window is limited by whichever runs out first. At 100 events per second, the default `maxEvents` of 1000 covers about 10 seconds, whatever `retentionMs` says. Memory use is at most `maxEvents` times your event size.
+
+### Limitations
+
+- **The buffer lives in the memory of one process.** After a restart, clients get `easse:reset`. With several instances behind a load balancer, a client reconnecting to a different instance also gets `easse:reset`, and a broadcast only reaches the clients of the instance that sent it.
+- **Only broadcasts are recovered.** Events from `res.sse.send` are not stored.
+
+## API
+
+### `easse(options?)`
+
+Creates a channel with its own clients and buffer, and returns its route middleware.
+
+| Option             | Default           | Description                                                   |
+| :----------------- | :---------------- | :------------------------------------------------------------ |
+| `retentionMs`      | `30000`           | How long events stay available for recovery, in milliseconds. |
+| `maxEvents`        | `1000`            | Maximum number of events kept in the buffer.                  |
+| `heartbeatMs`      | `25000`           | Interval between keep-alive comments. `0` disables them.      |
+| `maxBufferedBytes` | `1048576` (1 MiB) | Pending bytes allowed per client before it is disconnected.   |
+
+Mount it on a route, with any method. Using `app.use` is an error, because it would turn every request under that path into a stream. Your handler is optional.
+
+```typescript
+app.get('/events', sse);
+app.get('/events', sse, (req, res) => {});
+```
+
+### `sse.broadcast(data, event?)`
+
+Sends an event to every client on this channel and stores it for recovery. It can be called from anywhere, outside of any request.
+
+### `res.sse.send(data, event?, id?)`
+
+Sends an event to this connection only.
+
+If you pass an `id`, the browser adopts it as its last event ID and sends it on the next reconnection. Use it only when you implement your own resume logic with `res.sse.lastEventId`. An ID that isn't in the buffer results in an `easse:reset` on reconnection.
+
+### `res.sse.recovered`
+
+`true` if the client reconnected and its gap was recovered.
+
+### `res.sse.lastEventId`
+
+The `Last-Event-ID` sent by the client, if any.
+
+### Event data
+
+Strings are sent as they are, and anything else is sent as JSON. Line breaks are handled for you.
+
+`send` and `broadcast` throw a `TypeError` if the data has no JSON representation (such as `undefined`), or if `event` or `id` contain line breaks or NUL characters.
+
+### `Easse`
+
+The class behind the middleware, for when you need to manage the connection yourself. It takes the same options.
+
+```typescript
+import express from 'express';
+import { Easse } from 'easse';
+
+const app = express();
+const hub = new Easse();
+
+app.get('/events', (req, res) => {
+  const stream = hub.handle(req, res);
+  stream.send({ status: 'connected' }, 'welcome');
+});
+
+hub.broadcast({ price: 123.5 }, 'price-update');
+
+app.listen(3000);
+```
+
+## Production notes
+
+**HTTP/1.1 connection limit.** Browsers allow about 6 connections per domain over HTTP/1.1, shared across tabs, so further tabs would hang. Serve your app through an HTTP/2 proxy (Nginx, Cloudflare, AWS ALB...) to avoid this.
+
+**Proxies.** `easse` sends `X-Accel-Buffering: no` and `Cache-Control: no-cache, no-transform` so that Nginx and compatible proxies, and the `compression` middleware, don't hold events back. Heartbeats keep idle connections from being closed, so keep `heartbeatMs` below your proxy's idle timeout (60 seconds by default on Nginx).
+
+**Slow clients.** A client that stops reading is disconnected once it has more than `maxBufferedBytes` pending. If it reconnects in time, it recovers what it missed like any other client.
+
+**Authentication.** `easse` doesn't handle it. Put your auth middleware before it on the route.
+
+## Demo
+
+```bash
+npm run demo
+```
+
+Open `http://localhost:3000` and press the button to cut the connection: the events missed during the reconnection appear highlighted.
+
+## Contributing
+
+- `npm run build`: compile to `dist/`
+- `npm test`: run the tests, on both Express 4 and 5
+- `npm run typecheck`: type-check the library, tests and demo
+- `npm run dev`: compile in watch mode
+
+## License
+
+MIT

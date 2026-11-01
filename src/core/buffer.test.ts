@@ -1,80 +1,80 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ResilienceBuffer } from './buffer.js';
 
+const ids = (events: { id: string }[] | null) => events?.map((e) => e.id) ?? null;
+
 describe('ResilienceBuffer', () => {
-  let buffer: ResilienceBuffer;
-
   beforeEach(() => {
-    // 500ms retention for testing
-    buffer = new ResilienceBuffer(500);
+    vi.useFakeTimers();
   });
 
-  it('should initialize with default options', () => {
-    const defaultBuffer = new ResilienceBuffer();
-    expect(defaultBuffer).toBeDefined();
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
-  it('should store events and retrieve them by ID', () => {
-    buffer.add({ id: '1', data: 'test1' });
-    buffer.add({ id: '2', data: 'test2' });
-    buffer.add({ id: '3', data: 'test3' });
+  it('returns the events that came after the given ID', () => {
+    const buffer = new ResilienceBuffer();
+    buffer.add('1', 'a');
+    buffer.add('2', 'b');
+    buffer.add('3', 'c');
 
-    const missed = buffer.getMissedEvents('1');
-    expect(missed).toHaveLength(2);
-    expect(missed[0].id).toBe('2');
-    expect(missed[1].id).toBe('3');
+    expect(buffer.getMissedEvents('1')?.map((e) => e.frame)).toEqual(['b', 'c']);
   });
 
-  it('should return empty array if last-id is not found', () => {
-    buffer.add({ id: '1', data: 'test1' });
+  it('returns null for an unknown ID', () => {
+    const buffer = new ResilienceBuffer();
+    buffer.add('1', 'a');
 
-    const missed = buffer.getMissedEvents('999');
-    expect(missed).toHaveLength(0);
+    expect(buffer.getMissedEvents('unknown')).toBeNull();
   });
 
-  it('should respect max capacity (evict oldest)', () => {
-    // Default max capacity is 5. We add 6 events.
-    buffer.add({ id: '1', data: '1' });
-    buffer.add({ id: '2', data: '2' });
-    buffer.add({ id: '3', data: '3' });
-    buffer.add({ id: '4', data: '4' });
-    buffer.add({ id: '5', data: '5' });
-    buffer.add({ id: '6', data: '6' });
+  it('returns null when the buffer is empty, as after a server restart', () => {
+    expect(new ResilienceBuffer().getMissedEvents('1')).toBeNull();
+  });
 
-    // ID '1' should be gone
-    const allMissed = buffer.getMissedEvents('0'); // '0' not in buffer, returns [] usually, but here we want to check internal state or just retrieval behavior.
+  it('evicts the oldest events beyond maxEvents', () => {
+    const buffer = new ResilienceBuffer({ maxEvents: 3 });
+    ['1', '2', '3', '4'].forEach((id) => buffer.add(id, id));
 
-    // Better check: if we ask for missed after '1', it should return nothing because '1' is evicted so we can't find the anchor?
-    // Actually implementation says: if index -1 returns [].
-    // So if '1' is evicted, getMissedEvents('1') returns [].
+    expect(buffer.getMissedEvents('1')).toBeNull();
+    expect(ids(buffer.getMissedEvents('2'))).toEqual(['3', '4']);
+  });
+
+  it('expires events on read, without needing a new event', () => {
+    const buffer = new ResilienceBuffer({ retentionMs: 100 });
+    buffer.add('1', 'a');
+    buffer.add('2', 'b');
+
+    vi.advanceTimersByTime(101);
+
+    expect(buffer.getMissedEvents('1')).toBeNull();
+  });
+
+  it('keeps events exactly at the retention limit', () => {
+    const buffer = new ResilienceBuffer({ retentionMs: 100 });
+    buffer.add('1', 'a');
+    buffer.add('2', 'b');
+
+    vi.advanceTimersByTime(100);
+
+    expect(ids(buffer.getMissedEvents('1'))).toEqual(['2']);
+  });
+
+  it('treats the newest ID as up to date even after it expires', () => {
+    const buffer = new ResilienceBuffer({ retentionMs: 100 });
+    buffer.add('1', 'a');
+
+    vi.advanceTimersByTime(101);
 
     expect(buffer.getMissedEvents('1')).toEqual([]);
-    expect(allMissed).toEqual([]);
-
-    // If we ask for '2', it should return 3, 4, 5, 6 (4 events)
-    const missedFrom2 = buffer.getMissedEvents('2');
-    expect(missedFrom2).toHaveLength(4);
-    expect(missedFrom2[0].id).toBe('3');
-    expect(missedFrom2[3].id).toBe('6');
+    expect(buffer.lastId).toBe('1');
   });
 
-  it('should respect time retention', async () => {
-    // buffer configured with 500ms retention in beforeEach
-    buffer.add({ id: '1', data: 'test' });
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])('rejects retentionMs of %s', (value) => {
+    expect(() => new ResilienceBuffer({ retentionMs: value })).toThrow(RangeError);
+  });
 
-    // Wait for retention to pass
-    await new Promise((resolve) => setTimeout(resolve, 600));
-
-    // Trigger constraints check (usually happens on add, so we add a new one)
-    buffer.add({ id: '2', data: 'new' });
-
-    // '1' should be expired and removed.
-    // So asking for missed events since '1' should return empty because '1' is not found.
-    expect(buffer.getMissedEvents('1')).toEqual([]);
-
-    // Asking for events since a non-existent ID returns empty, which is consistent.
-    // To verify it's gone, we can try to find it via a hypothetical method or deduce it.
-    // If '1' was there, getMissedEvents('1') would return '2'.
-    // Since it returns [], '1' is likely gone (or '2' is gone too, but '2' is fresh).
+  it.each([0, -1, 1.5])('rejects maxEvents of %s', (value) => {
+    expect(() => new ResilienceBuffer({ maxEvents: value })).toThrow(RangeError);
   });
 });

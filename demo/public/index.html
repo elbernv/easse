@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Easse Real World Demo</title>
+    <title>Easse Demo</title>
     <style>
       body {
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -76,6 +76,10 @@
         border-left-color: #f59e0b;
         background: #fffbeb;
       }
+      .event.reset {
+        border-left-color: #ef4444;
+        background: #fef2f2;
+      }
       .meta {
         color: #71717a;
         font-size: 0.85rem;
@@ -99,15 +103,20 @@
     </style>
   </head>
   <body>
-    <h1>📡 Easse Real World Test</h1>
+    <h1>📡 Easse Demo</h1>
 
     <div class="controls">
-      <div>Prueba de desconexión real (WiFi)</div>
+      <button id="drop">Cortar conexión</button>
       <div id="status">
         <span id="statusText">Iniciando...</span>
         <div id="statusDot" class="dot"></div>
       </div>
     </div>
+
+    <p class="meta">
+      Azul: evento en vivo. Ámbar: evento perdido durante el corte y recuperado al reconectar. Rojo:
+      el servidor ya no tenía los eventos perdidos.
+    </p>
 
     <ul id="log"></ul>
 
@@ -115,74 +124,58 @@
       const log = document.getElementById('log');
       const statusText = document.getElementById('statusText');
       const statusDot = document.getElementById('statusDot');
+      const clientId = crypto.randomUUID();
 
-      // ID aleatorio para identificar sesiones en el server log
-      const clientId = Math.floor(Math.random() * 10000);
+      // Events arriving between a reconnection and the "ready" event are replays.
+      let replaying = false;
+      let hasConnected = false;
 
-      function connect() {
-        updateStatus('connecting');
-        console.log('Iniciando conexión SSE...');
+      const source = new EventSource(`/events?clientId=${clientId}`);
 
-        const eventSource = new EventSource(
-          `http://192.168.0.102:3000/events?clientId=${clientId}`, // your ip
-        );
+      source.onopen = () => {
+        replaying = hasConnected;
+        hasConnected = true;
+        updateStatus('Conectado', 'connected');
+      };
 
-        eventSource.onopen = () => {
-          updateStatus('connected');
-          console.log('Conexión abierta (onopen)');
-        };
+      source.onerror = () => updateStatus('Reconectando...', 'recovering');
 
-        eventSource.onerror = (err) => {
-          console.log('Error de conexión (onerror)', err);
-          if (eventSource.readyState === EventSource.CLOSED) {
-            updateStatus('disconnected');
-          } else {
-            updateStatus('reconnecting');
-          }
-        };
+      source.addEventListener('tick', (e) => {
+        const { time } = JSON.parse(e.data);
+        addLog(time, e.lastEventId, replaying ? 'recovered' : '');
+      });
 
-        eventSource.addEventListener('ping', (e) => {
-          const data = JSON.parse(e.data);
-          // Detectar si es recuperado (si el lastEventId salta o si llega muy rápido tras reconexión)
-          // En esta demo simple, lo marcamos si estamos en estado "reconnecting" visualmente
-          // O mejor: comparamos timestamps o IDs?
-          // La forma más visual es verlos llegar en ráfaga.
+      source.addEventListener('ready', () => {
+        replaying = false;
+      });
 
-          addLog(`[${data.time}] ${data.message}`, e.lastEventId);
-        });
+      source.addEventListener('easse:reset', () => {
+        addLog('Eventos perdidos: hay que recargar el estado', '', 'reset');
+      });
+
+      document.getElementById('drop').addEventListener('click', () => {
+        fetch(`/drop/${clientId}`, { method: 'POST' });
+      });
+
+      function updateStatus(text, state) {
+        statusText.textContent = text;
+        statusDot.className = `dot ${state}`;
       }
 
-      function updateStatus(state) {
-        statusDot.className = 'dot';
-        switch (state) {
-          case 'connected':
-            statusText.innerText = 'Conectado';
-            statusDot.classList.add('connected');
-            break;
-          case 'disconnected':
-            statusText.innerText = 'Desconectado';
-            statusDot.classList.add('disconnected');
-            break;
-          case 'reconnecting':
-          case 'connecting':
-            statusText.innerText = 'Reconectando...';
-            statusDot.classList.add('recovering');
-            break;
-        }
-      }
+      function addLog(message, id, kind) {
+        const item = document.createElement('li');
+        item.className = `event ${kind}`;
 
-      function addLog(msg, id) {
-        const li = document.createElement('li');
-        li.className = 'event';
-        li.innerHTML = `
-                <span class="content">${msg}</span>
-                <span class="meta">ID: ${id}</span>
-            `;
-        log.prepend(li);
-      }
+        const content = document.createElement('span');
+        content.textContent = message;
 
-      // Iniciar
-      connect();
+        const meta = document.createElement('span');
+        meta.className = 'meta';
+        meta.textContent = id && `ID: ${id.slice(0, 8)}`;
+
+        item.append(content, meta);
+        log.append(item);
+      }
     </script>
   </body>
 </html>

@@ -1,89 +1,117 @@
-import { Response } from 'express';
-import { randomUUID } from 'node:crypto';
-import { ResilienceBuffer, SSEEvent } from './buffer.js';
+import type { Response } from 'express';
 
-export class SSEStream {
-  private res: Response;
-  private buffer: ResilienceBuffer;
+export interface FrameOptions {
+  event?: string;
+  id?: string;
+}
 
-  constructor(res: Response, buffer: ResilienceBuffer) {
-    this.res = res;
-    this.buffer = buffer;
+export interface SSEStreamOptions {
+  /** Pending bytes allowed for this client before it is disconnected. */
+  maxBufferedBytes: number;
+  lastEventId?: string;
+  recovered?: boolean;
+}
+
+function assertSingleLine(name: string, value: string): void {
+  if (/[\r\n\0]/.test(value)) {
+    throw new TypeError(`easse: ${name} cannot contain line breaks or NUL characters`);
+  }
+}
+
+function serialize(data: unknown): string {
+  if (typeof data === 'string') {
+    return data;
   }
 
-  /**
-   * Initializes the SSE connection by sending the necessary headers.
-   */
+  const json = JSON.stringify(data);
+  if (json === undefined) {
+    throw new TypeError(`easse: cannot serialize data of type ${typeof data}`);
+  }
+  return json;
+}
+
+/**
+ * Serializes an event to the SSE wire format.
+ *
+ * @throws {TypeError} If `event` or `id` could break out of their field, or if
+ * `data` has no JSON representation.
+ */
+export function formatFrame(data: unknown, { event, id }: FrameOptions = {}): string {
+  let frame = '';
+
+  if (event !== undefined) {
+    assertSingleLine('event', event);
+    frame += `event: ${event}\n`;
+  }
+
+  if (id !== undefined) {
+    assertSingleLine('id', id);
+    frame += `id: ${id}\n`;
+  }
+
+  // The SSE spec treats CRLF, LF and CR alike as line terminators.
+  for (const line of serialize(data).split(/\r\n|\r|\n/)) {
+    frame += `data: ${line}\n`;
+  }
+
+  return `${frame}\n`;
+}
+
+/** A single client connection. */
+export class SSEStream {
+  /** The `Last-Event-ID` sent by the client, if it is reconnecting. */
+  readonly lastEventId: string | undefined;
+  /** Whether the client reconnected and its missed events were replayed. */
+  readonly recovered: boolean;
+
+  private readonly res: Response;
+  private readonly maxBufferedBytes: number;
+
+  constructor(res: Response, options: SSEStreamOptions) {
+    this.res = res;
+    this.maxBufferedBytes = options.maxBufferedBytes;
+    this.lastEventId = options.lastEventId;
+    this.recovered = options.recovered ?? false;
+  }
+
+  /** Sends the response headers and opens the stream. */
   init(): void {
     this.res.writeHead(200, {
       'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no', // Avoid buffering in proxies like Nginx
+      'X-Accel-Buffering': 'no',
     });
 
-    // Initial comment to force header flush and confirm connection
+    // Forces the headers out so the client knows the connection is open.
     this.res.write(': connected\n\n');
   }
 
   /**
-   * Sends an event to the client and stores it in the resilience buffer.
+   * Sends an event to this connection only. It is never stored for replay, and
+   * unless `id` is given it leaves the client's recovery position untouched.
    */
-  send(data: unknown, event?: string, id?: string, options: { skipBuffer?: boolean } = {}): void {
-    const currentId = id || randomUUID();
-
-    // Format frame
-    const frame = this.formatFrame(data, currentId, event);
-
-    // Write to response
-    this.res.write(frame);
-
-    // Store in buffer for future reconnected clients (unless skipped)
-    if (!options.skipBuffer) {
-      this.buffer.add({
-        id: currentId,
-        data,
-        event,
-      });
-    }
+  send(data: unknown, event?: string, id?: string): void {
+    this.write(formatFrame(data, { event, id }));
   }
 
   /**
-   * Replays a list of historical events (without adding them back to the buffer).
+   * Writes an already serialized chunk. A client that has stopped reading is
+   * disconnected instead of letting its pending data grow without limit; once
+   * it catches up, it can reconnect and recover what it missed.
+   *
+   * @internal
    */
-  replay(events: SSEEvent[]): void {
-    if (events.length === 0) return;
-
-    const stream = events.map((e) => this.formatFrame(e.data, e.id, e.event)).join('');
-    this.res.write(stream);
-  }
-
-  private formatFrame(data: unknown, id: string, event?: string): string {
-    let frame = '';
-
-    if (event) {
-      frame += `event: ${event}\n`;
+  write(chunk: string): void {
+    if (this.res.destroyed || this.res.writableEnded) {
+      return;
     }
 
-    frame += `id: ${id}\n`;
-
-    // Data serialization
-    let dataStr: string;
-    if (typeof data === 'string') {
-      dataStr = data;
-    } else if (typeof data === 'object') {
-      dataStr = JSON.stringify(data);
-    } else {
-      dataStr = String(data);
+    if (this.res.writableLength > this.maxBufferedBytes) {
+      this.res.destroy();
+      return;
     }
 
-    // Handle multi-line data
-    frame += dataStr
-      .split('\n')
-      .map((line) => `data: ${line}`)
-      .join('\n');
-    frame += '\n\n';
-
-    return frame;
+    this.res.write(chunk);
   }
 }

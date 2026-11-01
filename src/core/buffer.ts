@@ -1,58 +1,86 @@
-export interface SSEEvent {
+export const DEFAULT_RETENTION_MS = 30_000;
+export const DEFAULT_MAX_EVENTS = 1_000;
+
+export interface ResilienceBufferOptions {
+  /** How long events stay available for recovery, in milliseconds. */
+  retentionMs?: number;
+  /** Maximum number of events kept in memory. */
+  maxEvents?: number;
+}
+
+export interface BufferedEvent {
   id: string;
-  data: unknown;
-  event?: string;
-  retry?: number;
+  /** The event, already serialized to its SSE wire format. */
+  frame: string;
   timestamp: number;
 }
 
-export type InputEvent = Omit<SSEEvent, 'timestamp'>;
-
+/**
+ * In-memory window of recent broadcast events, used to replay what a client
+ * missed while it was disconnected.
+ */
 export class ResilienceBuffer {
-  private events: SSEEvent[] = [];
+  private events: BufferedEvent[] = [];
+  private latestId: string | undefined;
   private readonly retentionMs: number;
-  private readonly maxCapacity: number = 5;
+  private readonly maxEvents: number;
 
-  constructor(retentionMs: number = 5000) {
-    if (retentionMs > 10000) {
-      throw new Error('easse: Resilience buffer retention cannot exceed 10000ms');
+  constructor({
+    retentionMs = DEFAULT_RETENTION_MS,
+    maxEvents = DEFAULT_MAX_EVENTS,
+  }: ResilienceBufferOptions = {}) {
+    if (!Number.isFinite(retentionMs) || retentionMs <= 0) {
+      throw new RangeError('easse: retentionMs must be a positive number');
+    }
+    if (!Number.isInteger(maxEvents) || maxEvents <= 0) {
+      throw new RangeError('easse: maxEvents must be a positive integer');
     }
     this.retentionMs = retentionMs;
+    this.maxEvents = maxEvents;
   }
 
-  add(event: InputEvent): void {
-    const timestamp = Date.now();
-
-    this.events.push({ ...event, timestamp });
-
-    // Apply constraints: first by quantity (max 5), then by time
-
-    this.applyConstraints();
+  /** ID of the newest event ever added, even if it has since been evicted. */
+  get lastId(): string | undefined {
+    return this.latestId;
   }
 
-  getMissedEvents(lastId: string): SSEEvent[] {
-    const index = this.events.findIndex((e) => e.id === lastId);
+  add(id: string, frame: string): void {
+    this.events.push({ id, frame, timestamp: Date.now() });
+    this.latestId = id;
 
-    if (index === -1) {
+    if (this.events.length > this.maxEvents) {
+      this.events.splice(0, this.events.length - this.maxEvents);
+    }
+    this.evictExpired();
+  }
+
+  /**
+   * Returns the events that came after `lastId`.
+   *
+   * @returns The missed events (empty if the client is up to date), or `null`
+   * if `lastId` is unknown, meaning the client's gap cannot be determined.
+   */
+  getMissedEvents(lastId: string): BufferedEvent[] | null {
+    this.evictExpired();
+
+    // The newest event has nothing after it, so a client holding its ID has
+    // missed nothing, even if the event already expired from the window.
+    if (lastId === this.latestId) {
       return [];
     }
 
-    return this.events.slice(index + 1);
+    const index = this.events.findIndex((e) => e.id === lastId);
+    return index === -1 ? null : this.events.slice(index + 1);
   }
 
-  private applyConstraints(): void {
+  private evictExpired(): void {
     const now = Date.now();
+    const firstLive = this.events.findIndex((e) => now - e.timestamp <= this.retentionMs);
 
-    // 1. Capacity limit (Max 5 items)
-
-    if (this.events.length > this.maxCapacity) {
-      this.events.shift(); // Remove the oldest
-    }
-
-    // 2. Time limit (Eviction by age)
-
-    if (this.events.length > 0) {
-      this.events = this.events.filter((e) => now - e.timestamp <= this.retentionMs);
+    if (firstLive === -1) {
+      this.events = [];
+    } else if (firstLive > 0) {
+      this.events.splice(0, firstLive);
     }
   }
 }

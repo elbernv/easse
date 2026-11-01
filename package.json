@@ -1,6 +1,6 @@
 {
   "name": "easse",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Easy & Resilient Server-Sent Events for Express",
   "type": "module",
   "main": "./dist/index.js",
@@ -12,10 +12,13 @@
     }
   },
   "scripts": {
-    "build": "rimraf dist && tsc",
+    "build": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\" && tsc",
     "dev": "tsc --watch",
-    "test": "vitest",
-    "demo": "tsx demo/server.ts"
+    "test": "vitest run",
+    "demo": "tsx demo/server.ts",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "keywords": [
     "sse",
@@ -32,18 +35,35 @@
   "files": [
     "dist"
   ],
-  "author": "",
+  "author": "Elber Nava",
   "license": "MIT",
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^20.19.30",
     "express": "^5.2.1",
-    "rimraf": "^6.1.2",
+    "express4": "npm:express@^4.22.3",
     "tsx": "^4.21.0",
     "typescript": "^5.0.0",
     "vitest": "^4.0.18"
   },
   "peerDependencies": {
+    "@types/express": "^4.17.0 || ^5.0.0",
     "express": "^4.18.0 || ^5.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elbernv/easse.git"
+  },
+  "homepage": "https://github.com/elbernv/easse#readme",
+  "bugs": {
+    "url": "https://github.com/elbernv/easse/issues"
+  },
+  "peerDependenciesMeta": {
+    "@types/express": {
+      "optional": true
+    }
   }
 }
