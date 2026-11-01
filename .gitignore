@@ -30,3 +30,8 @@ coverage/
 *.tgz
 
 GEMINI.md
+
+# Claude Code
+.claude/
+CLAUDE.md
+.mcp.json
