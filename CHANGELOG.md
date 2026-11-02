@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+### Fixed
+
+- Replays could crash the server. Each one was written at once as a new string, so clients reconnecting with large gaps could exhaust the Node.js heap. Replays are now sent as the client reads them, sharing their memory with the buffer. **Upgrade if you broadcast large events.**
+- Clients reconnecting with more than `maxBufferedBytes` to recover were disconnected by the next event, even when they were reading fast enough, and could end up getting an `easse:reset`. A client catching up is now disconnected only if it falls `maxBufferedBytes` further behind.
+
 ## 0.1.0
 
 ### Security

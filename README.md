@@ -66,7 +66,7 @@ app.listen(3000);
 
 ### Combine both
 
-Replayed events are written before your handler runs, so you can send the initial state only to clients that need it.
+Replayed events are delivered before anything your handler sends, so you can send the initial state only to clients that need it.
 
 ```typescript
 import express from 'express';
@@ -145,7 +145,7 @@ Creates a channel with its own clients and buffer, and returns its route middlew
 | `retentionMs`      | `30000`           | How long events stay available for recovery, in milliseconds. |
 | `maxEvents`        | `1000`            | Maximum number of events kept in the buffer.                  |
 | `heartbeatMs`      | `25000`           | Interval between keep-alive comments. `0` disables them.      |
-| `maxBufferedBytes` | `1048576` (1 MiB) | Pending bytes allowed per client before it is disconnected.   |
+| `maxBufferedBytes` | `1048576` (1 MiB) | Pending bytes allowed per client, beyond its replay.          |
 
 Mount it on a route, with any method. Using `app.use` is an error, because it would turn every request under that path into a stream. Your handler is optional.
 
@@ -206,6 +206,8 @@ app.listen(3000);
 **Proxies.** `easse` sends `X-Accel-Buffering: no` and `Cache-Control: no-cache, no-transform` so that Nginx and compatible proxies, and the `compression` middleware, don't hold events back. Heartbeats keep idle connections from being closed, so keep `heartbeatMs` below your proxy's idle timeout (60 seconds by default on Nginx).
 
 **Slow clients.** A client that stops reading is disconnected once it has more than `maxBufferedBytes` pending. If it reconnects in time, it recovers what it missed like any other client.
+
+**Reconnections.** A replay is sent only as fast as the client reads it, and shares its memory with the buffer, so many clients reconnecting at once don't multiply it. While catching up, a client can be as far behind as the replay requires: it is disconnected only if it falls `maxBufferedBytes` further behind.
 
 **Authentication.** `easse` doesn't handle it. Put your auth middleware before it on the route.
 

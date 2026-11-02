@@ -69,7 +69,7 @@ export class Easse {
       // Carries the current ID so the next reconnection starts from here.
       stream.write(formatFrame({}, { event: RESET_EVENT, id: this.buffer.lastId }));
     } else if (missed !== undefined && missed.length > 0) {
-      stream.write(missed.map((e) => e.frame).join(''));
+      stream.writeReplay(missed.map((e) => e.frame));
     }
 
     return stream;
