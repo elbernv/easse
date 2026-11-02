@@ -404,6 +404,72 @@ describe.each([
       expect(healthy.raw().length).toBeGreaterThan(0);
       stalled.destroy();
     });
+
+    describe('during a replay larger than the limit', () => {
+      const MIB = 'x'.repeat(1024 * 1024);
+
+      /** Reconnects a client that isn't reading yet, with its replay still pending on the server. */
+      async function reconnectWithLargeReplay() {
+        const app = express();
+        const sse = easse({ maxBufferedBytes: 1024, maxEvents: 128, heartbeatMs: 0 });
+        const state: { res?: Response; closed: boolean } = { closed: false };
+        app.get('/events', sse, (req, res) => {
+          if (req.query.name !== 'returning') return;
+          state.res = res;
+          res.on('close', () => (state.closed = true));
+        });
+        const port = await listen(app);
+
+        const anchor = await connectAndDrop(port, sse.broadcast);
+        for (let i = 0; i < 32; i++) sse.broadcast(MIB);
+
+        const socket = net.connect(port);
+        socket.on('error', () => {});
+        socket.pause();
+        socket.write(
+          `GET /events?name=returning HTTP/1.1\r\nHost: test\r\nLast-Event-ID: ${anchor}\r\n\r\n`,
+        );
+        await vi.waitFor(() => expect(state.res?.writableLength).toBeGreaterThan(1024));
+
+        return { sse, socket, state };
+      }
+
+      it('does not hold the whole replay in the response', async () => {
+        const { socket, state } = await reconnectWithLargeReplay();
+
+        expect(state.res?.writableLength).toBeLessThan(4 * 1024 * 1024);
+        socket.destroy();
+      });
+
+      it('keeps the client and delivers everything once it reads', async () => {
+        const { sse, socket, state } = await reconnectWithLargeReplay();
+
+        sse.broadcast('after-replay');
+        await sleep(20);
+        expect(state.closed).toBe(false);
+
+        let tail = '';
+        socket.setEncoding('latin1');
+        socket.on('data', (chunk: string) => (tail = (tail + chunk).slice(-128)));
+        socket.resume();
+
+        await vi.waitFor(() => expect(tail).toContain('data: after-replay'), { timeout: 4000 });
+        expect(state.closed).toBe(false);
+        socket.destroy();
+      });
+
+      it('still disconnects a client that never reads it', async () => {
+        const { sse, socket, state } = await reconnectWithLargeReplay();
+
+        for (let i = 0; i < 16 && !state.closed; i++) {
+          sse.broadcast(MIB);
+          await sleep(5);
+        }
+
+        expect(state.closed).toBe(true);
+        socket.destroy();
+      });
+    });
   });
 
   it('rejects event names that could inject fields', async () => {

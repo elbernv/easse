@@ -66,6 +66,11 @@ export class SSEStream {
 
   private readonly res: Response;
   private readonly maxBufferedBytes: number;
+  private catchingUp = false;
+  /** What is waiting for the client to read, while it catches up. */
+  private queue: string[] = [];
+  private queuedBytes = 0;
+  private lowestQueuedBytes = 0;
 
   constructor(res: Response, options: SSEStreamOptions) {
     this.res = res;
@@ -107,6 +112,11 @@ export class SSEStream {
       return;
     }
 
+    if (this.catchingUp) {
+      this.enqueue(chunk);
+      return;
+    }
+
     if (this.res.writableLength > this.maxBufferedBytes) {
       this.res.destroy();
       return;
@@ -114,4 +124,52 @@ export class SSEStream {
 
     this.res.write(chunk);
   }
+
+  /**
+   * Sends the events a reconnecting client missed, only as fast as it reads
+   * them. Until it is done, anything else written to this stream waits its turn.
+   * The frames are shared with the buffer, so a replay costs almost no memory.
+   *
+   * @internal
+   */
+  writeReplay(frames: string[]): void {
+    this.queue = [...frames];
+    this.queuedBytes = frames.reduce((total, frame) => total + frame.length, 0);
+    this.lowestQueuedBytes = this.queuedBytes;
+    this.catchingUp = true;
+
+    this.res.once('close', () => {
+      this.queue = [];
+    });
+    this.pump();
+  }
+
+  /** A client catching up only has to keep making progress, whatever the size of its replay. */
+  private enqueue(chunk: string): void {
+    this.queue.push(chunk);
+    this.queuedBytes += chunk.length;
+
+    if (this.queuedBytes - this.lowestQueuedBytes > this.maxBufferedBytes) {
+      this.res.destroy();
+    }
+  }
+
+  private readonly pump = (): void => {
+    while (this.queue.length > 0) {
+      if (this.res.destroyed || this.res.writableEnded) {
+        return;
+      }
+
+      const frame = this.queue.shift() as string;
+      this.queuedBytes -= frame.length;
+      this.lowestQueuedBytes = Math.min(this.lowestQueuedBytes, this.queuedBytes);
+
+      if (!this.res.write(frame)) {
+        this.res.once('drain', this.pump);
+        return;
+      }
+    }
+
+    this.catchingUp = false;
+  };
 }
