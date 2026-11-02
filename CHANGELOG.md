@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+### Documentation
+
+- Added tested guidance for running behind Nginx and Apache, including Apache's limits on long-lived HTTP/2 streams. There are no code changes.
+
 ## 0.1.1
 
 ### Fixed
