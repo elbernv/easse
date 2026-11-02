@@ -201,15 +201,52 @@ app.listen(3000);
 
 ## Production notes
 
-**HTTP/1.1 connection limit.** Browsers allow about 6 connections per domain over HTTP/1.1, shared across tabs, so further tabs would hang. Serve your app through an HTTP/2 proxy (Nginx, Cloudflare, AWS ALB...) to avoid this.
-
-**Proxies.** `easse` sends `X-Accel-Buffering: no` and `Cache-Control: no-cache, no-transform` so that Nginx and compatible proxies, and the `compression` middleware, don't hold events back. Heartbeats keep idle connections from being closed, so keep `heartbeatMs` below your proxy's idle timeout (60 seconds by default on Nginx).
+**Connection limit.** Over HTTP/1.1, browsers allow about 6 connections per site, shared across tabs. In Chrome, only 6 of 10 tabs received events, and further pages on that site couldn't even load. Serve your app over HTTP/2 to avoid this, keeping in mind the Apache caveat below.
 
 **Slow clients.** A client that stops reading is disconnected once it has more than `maxBufferedBytes` pending. If it reconnects in time, it recovers what it missed like any other client.
 
 **Reconnections.** A replay is sent only as fast as the client reads it, and shares its memory with the buffer, so many clients reconnecting at once don't multiply it. While catching up, a client can be as far behind as the replay requires: it is disconnected only if it falls `maxBufferedBytes` further behind.
 
 **Authentication.** `easse` doesn't handle it. Put your auth middleware before it on the route.
+
+### Behind a proxy
+
+Tested on Nginx 1.28 and Apache 2.4.69, over HTTP/1.1 and HTTP/2, with real Chrome tabs and up to 5000 clients on one machine. Other proxies and CDNs, such as Cloudflare or AWS ALB, haven't been tested.
+
+Both work with a plain reverse proxy configuration. These are the ones we recommend:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+```
+
+```apache
+ProxyPass / http://127.0.0.1:3000/ flushpackets=on
+```
+
+- **Buffering:** Nginx relies on the `X-Accel-Buffering: no` header sent by `easse`. With its default configuration and that header ignored, clients received nothing at all, so don't strip it or set `proxy_ignore_headers X-Accel-Buffering`.
+- **Idle connections:** both proxies closed silent streams after 60 seconds by default. The default `heartbeatMs` kept them open. If you disable heartbeats or raise them, also raise the proxy's timeout.
+- **Compression:** `no-transform` doesn't stop Nginx's `gzip` or Apache's `mod_deflate` if you enable them for `text/event-stream`. Events still arrived on time, so it isn't a problem, but it isn't needed either.
+- **Reconnections and slow clients:** recovery and `maxBufferedBytes` work the same through both proxies. A stalled HTTP/2 stream doesn't affect others on the same connection.
+
+**Apache and HTTP/2.** We recommend Nginx for HTTP/2. Apache can leave streams waiting forever, with no error, because of two limits that streams which never finish run into:
+
+- **Streams per connection:** Apache starts each HTTP/2 connection with room for 6 active requests, and raises it as short requests complete. A Chrome page opening 10 `EventSource` connections got only 6, and tabs of the same site opened together sometimes got only 6. We didn't find a setting that changes this, so use one stream per page and share it.
+- **Workers per process:** each stream holds an HTTP/2 worker for as long as it is open, and a connection stays on the process that accepted it. Apache doesn't start more processes when these run out, so with `H2MaxWorkers` at 150, only 300 of 1000 clients were answered.
+
+These settings served all 5000 clients in our tests, at a cost of about 15,000 threads and 1.5 GB of memory. Adjust them to your number of clients, and test them with your own load:
+
+```apache
+ServerLimit 64
+ThreadLimit 100
+ThreadsPerChild 100
+MaxRequestWorkers 6400
+StartServers 64
+H2MaxWorkers 2000
+```
 
 ## Demo
 
