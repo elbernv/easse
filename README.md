@@ -232,7 +232,21 @@ ProxyPass / http://127.0.0.1:3000/ flushpackets=on
 - **Compression:** `no-transform` doesn't stop Nginx's `gzip` or Apache's `mod_deflate` if you enable them for `text/event-stream`. Events still arrived on time, so it isn't a problem, but it isn't needed either.
 - **Reconnections and slow clients:** recovery and `maxBufferedBytes` work the same through both proxies. A stalled HTTP/2 stream doesn't affect others on the same connection.
 
-**Apache and HTTP/2.** Apache starts each HTTP/2 connection with room for only 6 active requests, and raises it as short requests complete. Further streams wait, with no error: a Chrome page opening 10 `EventSource` connections got only 6. Under load, it also left some streams unanswered, while Nginx and Apache over HTTP/1.1 answered all of them. If you expect several streams per connection or many clients, prefer Nginx. On Apache, each open stream also takes up a worker, so `MaxRequestWorkers` limits your clients.
+**Apache and HTTP/2.** We recommend Nginx for HTTP/2. Apache can leave streams waiting forever, with no error, because of two limits that streams which never finish run into:
+
+- **Streams per connection:** Apache starts each HTTP/2 connection with room for 6 active requests, and raises it as short requests complete. A Chrome page opening 10 `EventSource` connections got only 6, and tabs of the same site opened together sometimes got only 6. We didn't find a setting that changes this, so use one stream per page and share it.
+- **Workers per process:** each stream holds an HTTP/2 worker for as long as it is open, and a connection stays on the process that accepted it. Apache doesn't start more processes when these run out, so with `H2MaxWorkers` at 150, only 300 of 1000 clients were answered.
+
+These settings served all 5000 clients in our tests, at a cost of about 15,000 threads and 1.5 GB of memory. Adjust them to your number of clients, and test them with your own load:
+
+```apache
+ServerLimit 64
+ThreadLimit 100
+ThreadsPerChild 100
+MaxRequestWorkers 6400
+StartServers 64
+H2MaxWorkers 2000
+```
 
 ## Demo
 
